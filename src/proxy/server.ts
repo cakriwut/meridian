@@ -1549,8 +1549,9 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
               let event: Record<string, unknown>
               try { event = JSON.parse(dataStr) as Record<string, unknown> }
               catch { continue }
+              if (typeof event.type !== "string") continue
 
-              const chunk = translateAnthropicSseEvent(event, completionId, model, created)
+              const chunk = translateAnthropicSseEvent(event as { type: string } & Record<string, unknown>, completionId, model, created)
               if (chunk) controller.enqueue(encoder.encode(`data: ${JSON.stringify(chunk)}\n\n`))
             }
           }
