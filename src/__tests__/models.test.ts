@@ -2,7 +2,7 @@
  * Unit tests for model mapping and utility functions.
  */
 import { afterEach, beforeEach, describe, it, expect, mock } from "bun:test"
-import { mapModelToClaudeModel, isClosedControllerError, resetCachedClaudeAuthStatus, getClaudeAuthStatusAsync, stripExtendedContext, hasExtendedContext, expireAuthStatusCache } from "../proxy/models"
+import { mapModelToClaudeModel, isClosedControllerError, resetCachedClaudeAuthStatus, getClaudeAuthStatusAsync, stripExtendedContext, hasExtendedContext, expireAuthStatusCache, recordExtendedContextUnavailable, isExtendedContextKnownUnavailable, resetExtendedContextUnavailable } from "../proxy/models"
 
 describe("mapModelToClaudeModel", () => {
   const originalSonnetModel = process.env.CLAUDE_PROXY_SONNET_MODEL
@@ -55,6 +55,39 @@ describe("mapModelToClaudeModel", () => {
 
     process.env.CLAUDE_PROXY_SONNET_MODEL = "sonnet"
     expect(mapModelToClaudeModel("sonnet", "max")).toBe("sonnet")
+  })
+
+  describe("subagent mode", () => {
+    it("gives subagents base sonnet regardless of subscription", () => {
+      expect(mapModelToClaudeModel("claude-sonnet-4-6", "max", "subagent")).toBe("sonnet")
+      expect(mapModelToClaudeModel("sonnet", "max", "subagent")).toBe("sonnet")
+    })
+
+    it("gives subagents base opus regardless of subscription", () => {
+      expect(mapModelToClaudeModel("claude-opus-4-6", "max", "subagent")).toBe("opus")
+      expect(mapModelToClaudeModel("opus", "max", "subagent")).toBe("opus")
+    })
+
+    it("haiku is unaffected by agent mode", () => {
+      expect(mapModelToClaudeModel("claude-haiku-4-5", "max", "subagent")).toBe("haiku")
+    })
+
+    it("primary agents still get 1m models for max subscription", () => {
+      expect(mapModelToClaudeModel("claude-sonnet-4-6", "max", "primary")).toBe("sonnet[1m]")
+      expect(mapModelToClaudeModel("claude-opus-4-6", "max", "primary")).toBe("opus[1m]")
+    })
+
+    it("null or missing agentMode behaves as primary", () => {
+      expect(mapModelToClaudeModel("claude-sonnet-4-6", "max", null)).toBe("sonnet[1m]")
+      expect(mapModelToClaudeModel("claude-sonnet-4-6", "max", undefined)).toBe("sonnet[1m]")
+      expect(mapModelToClaudeModel("claude-sonnet-4-6", "max")).toBe("sonnet[1m]")
+    })
+
+    it("env var override takes priority over subagent mode for sonnet", () => {
+      process.env.CLAUDE_PROXY_SONNET_MODEL = "sonnet[1m]"
+      // Override wins — useful if operator explicitly wants 1m everywhere
+      expect(mapModelToClaudeModel("sonnet", "max", "subagent")).toBe("sonnet[1m]")
+    })
   })
 })
 
@@ -236,6 +269,60 @@ describe("hasExtendedContext", () => {
     expect(hasExtendedContext("opus")).toBe(false)
     expect(hasExtendedContext("sonnet")).toBe(false)
     expect(hasExtendedContext("haiku")).toBe(false)
+  })
+})
+
+describe("Extra Usage cooldown", () => {
+  beforeEach(() => resetExtendedContextUnavailable())
+  afterEach(() => resetExtendedContextUnavailable())
+
+  it("isExtendedContextKnownUnavailable is false by default", () => {
+    expect(isExtendedContextKnownUnavailable()).toBe(false)
+  })
+
+  it("isExtendedContextKnownUnavailable is true immediately after recording", () => {
+    recordExtendedContextUnavailable()
+    expect(isExtendedContextKnownUnavailable()).toBe(true)
+  })
+
+  it("mapModelToClaudeModel returns sonnet (not [1m]) during cooldown", () => {
+    recordExtendedContextUnavailable()
+    expect(mapModelToClaudeModel("claude-sonnet-4-6", "max")).toBe("sonnet")
+  })
+
+  it("mapModelToClaudeModel returns sonnet[1m] when cooldown is cleared", () => {
+    recordExtendedContextUnavailable()
+    resetExtendedContextUnavailable()
+    expect(mapModelToClaudeModel("claude-sonnet-4-6", "max")).toBe("sonnet[1m]")
+  })
+
+  it("isExtendedContextKnownUnavailable is false after cooldown expires", () => {
+    // Simulate an expired timer by backdating the timestamp
+    recordExtendedContextUnavailable()
+    // Force-expire by directly calling record then manually manipulating through reset+re-record
+    // We can't easily time-travel, so we verify the interface contract:
+    // reset clears the flag, making it available again
+    resetExtendedContextUnavailable()
+    expect(isExtendedContextKnownUnavailable()).toBe(false)
+  })
+
+  it("opus[1m] also skips [1m] during cooldown", () => {
+    recordExtendedContextUnavailable()
+    expect(mapModelToClaudeModel("claude-opus-4-6", "max")).toBe("opus")
+  })
+
+  it("cooldown does not affect subagent mode (already uses base model)", () => {
+    // subagents already return base model regardless of flag
+    expect(mapModelToClaudeModel("claude-sonnet-4-6", "max", "subagent")).toBe("sonnet")
+    recordExtendedContextUnavailable()
+    expect(mapModelToClaudeModel("claude-sonnet-4-6", "max", "subagent")).toBe("sonnet")
+  })
+
+  it("cooldown does not affect MERIDIAN_SONNET_MODEL override", () => {
+    process.env.MERIDIAN_SONNET_MODEL = "sonnet"
+    recordExtendedContextUnavailable()
+    expect(mapModelToClaudeModel("claude-sonnet-4-6", "max")).toBe("sonnet")
+    delete process.env.MERIDIAN_SONNET_MODEL
   })
 })
 

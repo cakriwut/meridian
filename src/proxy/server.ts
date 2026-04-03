@@ -19,7 +19,8 @@ import { telemetryStore, diagnosticLog, createTelemetryRoutes, landingHtml } fro
 import type { RequestMetric } from "../telemetry"
 import { classifyError, isStaleSessionError, isRateLimitError, isExtraUsageRequiredError, isExpiredTokenError } from "./errors"
 import { refreshOAuthToken } from "./tokenRefresh"
-import { mapModelToClaudeModel, resolveClaudeExecutableAsync, isClosedControllerError, getClaudeAuthStatusAsync, hasExtendedContext, stripExtendedContext } from "./models"
+import { checkPluginConfigured } from "./setup"
+import { mapModelToClaudeModel, resolveClaudeExecutableAsync, isClosedControllerError, getClaudeAuthStatusAsync, hasExtendedContext, stripExtendedContext, recordExtendedContextUnavailable } from "./models"
 import { getLastUserMessage } from "./messages"
 import { detectAdapter } from "./adapters/detect"
 import { buildQueryOptions, type QueryContext } from "./query"
@@ -181,7 +182,8 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
       try {
         const body = await c.req.json()
         const authStatus = await getClaudeAuthStatusAsync()
-        let model = mapModelToClaudeModel(body.model || "sonnet", authStatus?.subscriptionType)
+        const agentMode = c.req.header("x-opencode-agent-mode") ?? null
+        let model = mapModelToClaudeModel(body.model || "sonnet", authStatus?.subscriptionType, agentMode)
         const adapter = detectAdapter(c)
         // Allow adapter to override streaming preference (e.g. LiteLLM requires non-streaming)
         const adapterStreamPref = adapter.prefersStreaming?.(body)
@@ -230,7 +232,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
         }).join(" → ")
         const lineageType = lineageResult.type === "diverged" && !cachedSession ? "new" : lineageResult.type
         const msgCount = Array.isArray(body.messages) ? body.messages.length : 0
-        const requestLogLine = `${requestMeta.requestId} model=${model} stream=${stream} tools=${body.tools?.length ?? 0} lineage=${lineageType} session=${resumeSessionId?.slice(0, 8) || "new"}${isUndo && undoRollbackUuid ? ` rollback=${undoRollbackUuid.slice(0, 8)}` : ""} active=${activeSessions}/${MAX_CONCURRENT_SESSIONS} msgCount=${msgCount}`
+        const requestLogLine = `${requestMeta.requestId} model=${model} stream=${stream} tools=${body.tools?.length ?? 0} lineage=${lineageType} session=${resumeSessionId?.slice(0, 8) || "new"}${isUndo && undoRollbackUuid ? ` rollback=${undoRollbackUuid.slice(0, 8)}` : ""}${agentMode ? ` agent=${agentMode}` : ""} active=${activeSessions}/${MAX_CONCURRENT_SESSIONS} msgCount=${msgCount}`
         console.error(`[PROXY] ${requestLogLine} msgs=${msgSummary}`)
         diagnosticLog.session(`${requestLogLine}`, requestMeta.requestId)
 
@@ -498,7 +500,10 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                     passthrough, stream: false, sdkAgents, passthroughMcp, cleanEnv,
                     resumeSessionId, isUndo, undoRollbackUuid, sdkHooks, adapter, onStderr,
                   }))) {
-                    if ((event as any).type === "assistant") {
+                    // Only count real assistant content — not SDK error messages
+                    // (which arrive as type:"assistant" with an error field set).
+                    // Counting error assistants as content would prevent retries.
+                    if ((event as any).type === "assistant" && !(event as any).error) {
                       didYieldContent = true
                     }
                     yield event
@@ -530,17 +535,22 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                     return
                   }
 
-                  // Extra Usage required: strip [1m] immediately (no backoff needed)
+                  // Extra Usage required: strip [1m] and record 1-hour cooldown.
+                  // mapModelToClaudeModel will skip [1m] for the next hour so
+                  // subsequent requests don't each make one extra failed attempt.
+                  // After the hour expires a single probe fires; if the user has
+                  // enabled Extra Usage in the meantime it succeeds and the flag clears.
                   if (isExtraUsageRequiredError(errMsg) && hasExtendedContext(model)) {
                     const from = model
                     model = stripExtendedContext(model)
+                    recordExtendedContextUnavailable()
                     claudeLog("upstream.context_fallback", {
                       mode: "non_stream",
                       from,
                       to: model,
                       reason: "extra_usage_required",
                     })
-                    console.error(`[PROXY] ${requestMeta.requestId} extra usage required for [1m], falling back to ${model}`)
+                    console.error(`[PROXY] ${requestMeta.requestId} extra usage required for [1m], falling back to ${model} (skipping [1m] for 1h)`)
                     continue
                   }
 
@@ -852,17 +862,18 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                       return
                     }
 
-                    // Extra Usage required: strip [1m] immediately (no backoff needed)
+                    // Extra Usage required: strip [1m] and record 1-hour cooldown.
                     if (isExtraUsageRequiredError(errMsg) && hasExtendedContext(model)) {
                       const from = model
                       model = stripExtendedContext(model)
+                      recordExtendedContextUnavailable()
                       claudeLog("upstream.context_fallback", {
                         mode: "stream",
                         from,
                         to: model,
                         reason: "extra_usage_required",
                       })
-                      console.error(`[PROXY] ${requestMeta.requestId} extra usage required for [1m], falling back to ${model}`)
+                      console.error(`[PROXY] ${requestMeta.requestId} extra usage required for [1m], falling back to ${model} (skipping [1m] for 1h)`)
                       continue
                     }
 
@@ -1382,6 +1393,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
           subscriptionType: auth.subscriptionType,
         },
         mode: (process.env.MERIDIAN_PASSTHROUGH ?? process.env.CLAUDE_PROXY_PASSTHROUGH) ? "passthrough" : "internal",
+        plugin: { opencode: checkPluginConfigured() ? "configured" : "not-configured" },
       })
     } catch {
       return c.json({
