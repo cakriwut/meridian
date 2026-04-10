@@ -14,6 +14,11 @@ CREATE TABLE IF NOT EXISTS metrics (
   is_resume            INTEGER NOT NULL,
   is_passthrough       INTEGER NOT NULL,
   lineage_type         TEXT,
+  has_deferred_tools   INTEGER,
+  deferred_tool_count  INTEGER,
+  tool_count           INTEGER,
+  discovered_tools     TEXT,
+  session_discovered_count INTEGER,
   message_count        INTEGER,
   sdk_session_id       TEXT,
   status               INTEGER NOT NULL,
@@ -57,7 +62,6 @@ function openDatabase(dbPath: string): Database.Database {
   db.pragma("synchronous = NORMAL")
   db.exec(METRICS_SCHEMA)
   db.exec(LOGS_SCHEMA)
-  try { db.exec("VACUUM") } catch { /* ignore if busy */ }
   return db
 }
 
@@ -75,14 +79,18 @@ class SqliteTelemetryStore implements ITelemetryStore {
     this.insertStmt = db.prepare(`
       INSERT INTO metrics (
         request_id, timestamp, adapter, model, request_model, mode,
-        is_resume, is_passthrough, lineage_type, message_count, sdk_session_id,
+        is_resume, is_passthrough, lineage_type,
+        has_deferred_tools, deferred_tool_count, tool_count, discovered_tools, session_discovered_count,
+        message_count, sdk_session_id,
         status, queue_wait_ms, proxy_overhead_ms, ttfb_ms,
         upstream_duration_ms, total_duration_ms, content_blocks, text_events, error,
         input_tokens, output_tokens, cache_read_input_tokens,
         cache_creation_input_tokens, cache_hit_rate
       ) VALUES (
         @requestId, @timestamp, @adapter, @model, @requestModel, @mode,
-        @isResume, @isPassthrough, @lineageType, @messageCount, @sdkSessionId,
+        @isResume, @isPassthrough, @lineageType,
+        @hasDeferredTools, @deferredToolCount, @toolCount, @discoveredTools, @sessionDiscoveredCount,
+        @messageCount, @sdkSessionId,
         @status, @queueWaitMs, @proxyOverheadMs, @ttfbMs,
         @upstreamDurationMs, @totalDurationMs, @contentBlocks, @textEvents, @error,
         @inputTokens, @outputTokens, @cacheReadInputTokens,
@@ -105,6 +113,11 @@ class SqliteTelemetryStore implements ITelemetryStore {
         isResume: metric.isResume ? 1 : 0,
         isPassthrough: metric.isPassthrough ? 1 : 0,
         lineageType: metric.lineageType ?? null,
+        hasDeferredTools: metric.hasDeferredTools ? 1 : metric.hasDeferredTools === false ? 0 : null,
+        deferredToolCount: metric.deferredToolCount ?? null,
+        toolCount: metric.toolCount ?? null,
+        discoveredTools: metric.discoveredTools ? JSON.stringify(metric.discoveredTools) : null,
+        sessionDiscoveredCount: metric.sessionDiscoveredCount ?? null,
         messageCount: metric.messageCount ?? null,
         sdkSessionId: metric.sdkSessionId ?? null,
         status: metric.status,
@@ -286,6 +299,11 @@ function rowToMetric(r: Record<string, unknown>): RequestMetric {
     isResume: r.is_resume === 1,
     isPassthrough: r.is_passthrough === 1,
     lineageType: (r.lineage_type as RequestMetric["lineageType"]) ?? undefined,
+    hasDeferredTools: r.has_deferred_tools === 1 ? true : r.has_deferred_tools === 0 ? false : undefined,
+    deferredToolCount: (r.deferred_tool_count as number) ?? undefined,
+    toolCount: (r.tool_count as number) ?? undefined,
+    discoveredTools: r.discovered_tools ? JSON.parse(r.discovered_tools as string) : undefined,
+    sessionDiscoveredCount: (r.session_discovered_count as number) ?? undefined,
     messageCount: (r.message_count as number) ?? undefined,
     sdkSessionId: (r.sdk_session_id as string) ?? undefined,
     status: r.status as number,

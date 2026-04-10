@@ -136,6 +136,11 @@ describe("SqliteTelemetryStore", () => {
       isResume: true,
       isPassthrough: true,
       lineageType: "continuation",
+      hasDeferredTools: true,
+      deferredToolCount: 44,
+      toolCount: 50,
+      discoveredTools: ["task_update", "lsp_diagnostics"],
+      sessionDiscoveredCount: 3,
       messageCount: 5,
       sdkSessionId: "sess-abc",
       status: 200,
@@ -163,6 +168,11 @@ describe("SqliteTelemetryStore", () => {
     expect(retrieved!.isResume).toBe(true)
     expect(retrieved!.isPassthrough).toBe(true)
     expect(retrieved!.lineageType).toBe("continuation")
+    expect(retrieved!.hasDeferredTools).toBe(true)
+    expect(retrieved!.deferredToolCount).toBe(44)
+    expect(retrieved!.toolCount).toBe(50)
+    expect(retrieved!.discoveredTools).toEqual(["task_update", "lsp_diagnostics"])
+    expect(retrieved!.sessionDiscoveredCount).toBe(3)
     expect(retrieved!.messageCount).toBe(5)
     expect(retrieved!.sdkSessionId).toBe("sess-abc")
     expect(retrieved!.inputTokens).toBe(1200)

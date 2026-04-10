@@ -1,10 +1,16 @@
-import { env, envInt } from "../env"
+import { join } from "node:path"
+import { homedir } from "node:os"
+import { envBool, env, envInt } from "../env"
 import { MemoryTelemetryStore } from "./store"
 import { MemoryDiagnosticLogStore } from "./logStore"
 import type { ITelemetryStore, IDiagnosticLogStore } from "./types"
 
+function getDefaultDbPath(): string {
+  return join(homedir(), ".config", "meridian", "telemetry.db")
+}
+
 function createStores(): { telemetry: ITelemetryStore; diagnostics: IDiagnosticLogStore } {
-  if (env("TELEMETRY_PERSIST") === "false") {
+  if (!envBool("TELEMETRY_PERSIST")) {
     return {
       telemetry: new MemoryTelemetryStore(),
       diagnostics: new MemoryDiagnosticLogStore(),
@@ -13,12 +19,13 @@ function createStores(): { telemetry: ITelemetryStore; diagnostics: IDiagnosticL
 
   try {
     const { createSqliteStores } = require("./sqlite") as typeof import("./sqlite")
-    const dbPath = env("TELEMETRY_DB") ?? "/home/claude/.claude/telemetry.db"
+    const dbPath = env("TELEMETRY_DB") ?? getDefaultDbPath()
     const retention = envInt("TELEMETRY_RETENTION_DAYS", 7)
     const stores = createSqliteStores(dbPath, retention)
+    console.error(`[telemetry] SQLite persistence enabled: ${dbPath} (${retention}d retention)`)
     return { telemetry: stores.telemetry, diagnostics: stores.diagnostics }
   } catch {
-    console.warn("[telemetry] SQLite unavailable, using in-memory store")
+    console.warn("[telemetry] MERIDIAN_TELEMETRY_PERSIST is set but libsql is not installed. Run: npm install libsql")
     return {
       telemetry: new MemoryTelemetryStore(),
       diagnostics: new MemoryDiagnosticLogStore(),
